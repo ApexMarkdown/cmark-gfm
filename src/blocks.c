@@ -1091,6 +1091,32 @@ static cmark_node *check_open_blocks(cmark_parser *parser, cmark_chunk *input,
     case CMARK_NODE_PARAGRAPH:
       if (parser->blank)
         goto done;
+      // Check if this line starts with a list marker (CommonMark spec: lists interrupt paragraphs)
+      if (!parser->blank) {
+        cmark_list *list_data = NULL;
+        bufsize_t matched = parse_list_marker(
+            parser->mem, input, parser->first_nonspace,
+            true,  // interrupts_paragraph = true
+            &list_data);
+        if (matched > 0) {
+          // Found a list marker - close the paragraph
+          parser->mem->free(list_data);
+          goto done;
+        }
+        /* Definition list line (: or :: followed by space) interrupts paragraph
+         * so extensions can open a definition list (e.g. Kramdown-style). */
+        bufsize_t pos = parser->first_nonspace;
+        if (pos < (bufsize_t)input->len && input->data[pos] == ':') {
+          bufsize_t next = pos + 1;
+          if (next < (bufsize_t)input->len && (input->data[next] == ' ' || input->data[next] == '\t'))
+            goto done;
+          if (next < (bufsize_t)input->len && input->data[next] == ':') {
+            next++;
+            if (next < (bufsize_t)input->len && (input->data[next] == ' ' || input->data[next] == '\t'))
+              goto done;
+          }
+        }
+      }
       break;
 		case CMARK_NODE_FOOTNOTE_DEFINITION:
 			if (!parse_footnote_definition_block_prefix(parser, input, container))
@@ -1334,6 +1360,34 @@ static void open_new_blocks(cmark_parser *parser, cmark_node **container,
   }
 }
 
+/* Apex: image and reference-definition lines should not lazy-continue into
+ * blockquote paragraphs (e.g. "> quote" followed by "![][id]" on the next line). */
+static bool S_line_interrupts_blockquote_lazy(cmark_chunk *input, bufsize_t pos) {
+  if (pos >= (bufsize_t)input->len)
+    return false;
+
+  if (peek_at(input, pos) == '!' && pos + 1 < (bufsize_t)input->len &&
+      peek_at(input, pos + 1) == '[')
+    return true;
+
+  if (peek_at(input, pos) == '[') {
+    bufsize_t i = pos + 1;
+    while (i < (bufsize_t)input->len && input->data[i] != '\n' &&
+           input->data[i] != '\r' && input->data[i] != ']') {
+      i++;
+    }
+    if (i < (bufsize_t)input->len && input->data[i] == ']' &&
+        i + 1 < (bufsize_t)input->len && input->data[i + 1] == ':') {
+      bufsize_t j = i + 2;
+      if (j < (bufsize_t)input->len &&
+          (input->data[j] == ' ' || input->data[j] == '\t'))
+        return true;
+    }
+  }
+
+  return false;
+}
+
 static void add_text_to_container(cmark_parser *parser, cmark_node *container,
                                   cmark_node *last_matched_container,
                                   cmark_chunk *input) {
@@ -1374,7 +1428,8 @@ static void add_text_to_container(cmark_parser *parser, cmark_node *container,
   // the open paragraph.
   if (parser->current != last_matched_container &&
       container == last_matched_container && !parser->blank &&
-      S_type(parser->current) == CMARK_NODE_PARAGRAPH) {
+      S_type(parser->current) == CMARK_NODE_PARAGRAPH &&
+      !S_line_interrupts_blockquote_lazy(input, parser->first_nonspace)) {
     add_line(parser->current, input, parser);
   } else { // not a lazy continuation
     // Finalize any blocks that were not matched and set cur to container:
