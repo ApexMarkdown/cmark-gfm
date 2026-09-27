@@ -267,7 +267,7 @@ static cmark_node *url_match(cmark_parser *parser, cmark_node *parent,
   cmark_node *text = cmark_node_new_with_mem(CMARK_NODE_TEXT, parser->mem);
   text->as.literal = url;
   cmark_node_append_child(node, text);
-  
+
   node->start_line = text->start_line = node->end_line = text->end_line = cmark_inline_parser_get_line(inline_parser);
 
   node->start_column = text->start_column = max_rewind - rewind;
@@ -318,6 +318,64 @@ static bool validate_protocol(const char protocol[], uint8_t *data, size_t rewin
   return !cmark_isalnum(prev_char);
 }
 
+static bool inside_html_tag(const uint8_t *data, size_t at_pos) {
+  bool in_tag = false;
+  uint8_t quote = 0;
+  size_t i;
+
+  for (i = 0; i < at_pos; ++i) {
+    uint8_t c = data[i];
+
+    if (!in_tag) {
+      if (c == '<')
+        in_tag = true;
+      continue;
+    }
+
+    if (quote != 0) {
+      if (c == quote)
+        quote = 0;
+      continue;
+    }
+
+    if (c == '"' || c == '\'') {
+      quote = c;
+      continue;
+    }
+
+    if (c == '>')
+      in_tag = false;
+  }
+
+  return in_tag;
+}
+
+static bool is_image_density_suffix(const uint8_t *data, size_t size) {
+  size_t i = 0;
+
+  if (size < 4)
+    return false;
+
+  while (i < size && cmark_isdigit(data[i]))
+    i++;
+
+  if (i == 0 || i >= size || data[i] != 'x')
+    return false;
+  i++;
+
+  if (i >= size || data[i] != '.')
+    return false;
+  i++;
+
+  if (i >= size || !cmark_isalnum(data[i]))
+    return false;
+
+  while (i < size && cmark_isalnum(data[i]))
+    i++;
+
+  return i == size;
+}
+
 static void postprocess_text(cmark_parser *parser, cmark_node *text) {
   size_t start = 0;
   size_t offset = 0;
@@ -350,6 +408,11 @@ static void postprocess_text(cmark_parser *parser, cmark_node *text) {
 
     max_rewind = at - (data + start + offset);
 
+    if (inside_html_tag(data + start + offset, max_rewind)) {
+      offset += max_rewind + 1;
+      continue;
+    }
+
 found_at:
     for (rewind = 0; rewind < max_rewind; ++rewind) {
       uint8_t c = data[start + offset + max_rewind - rewind - 1];
@@ -381,6 +444,14 @@ found_at:
       continue;
     }
 
+    /* Require that the character immediately before @ is alphanumeric.
+     * This prevents matching @ in URLs like https://example.com/@user */
+    uint8_t char_before_at = data[start + offset + max_rewind - 1];
+    if (!cmark_isalnum(char_before_at)) {
+      offset += max_rewind + 1;
+      continue;
+    }
+
     assert(data[start + offset + max_rewind] == '@');
     for (link_end = 1; link_end < remaining - offset - max_rewind; ++link_end) {
       uint8_t c = data[start + offset + max_rewind + link_end];
@@ -405,6 +476,11 @@ found_at:
     if (link_end < 2 || np == 0 ||
         (!cmark_isalpha(data[start + offset + max_rewind + link_end - 1]) &&
          data[start + offset + max_rewind + link_end - 1] != '.')) {
+      offset += max_rewind + link_end;
+      continue;
+    }
+
+    if (is_image_density_suffix(data + start + offset + max_rewind + 1, link_end - 1)) {
       offset += max_rewind + link_end;
       continue;
     }

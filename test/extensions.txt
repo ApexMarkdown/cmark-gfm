@@ -701,6 +701,12 @@ http://🍄.ga/ http://x🍄.ga/
 ````````````````````````````````
 
 ```````````````````````````````` example
+<a class="widget-shot js-lightbox" href="/assets/images/shots/macos/text-basic@2x.jpg"><img srcset="/assets/images/shots/macos/text-basic@2x.jpg 2x"></a> scyther@pokemon.com
+.
+<p><a class="widget-shot js-lightbox" href="/assets/images/shots/macos/text-basic@2x.jpg"><img srcset="/assets/images/shots/macos/text-basic@2x.jpg 2x"></a> <a href="mailto:scyther@pokemon.com">scyther@pokemon.com</a></p>
+````````````````````````````````
+
+```````````````````````````````` example
 This shouldn't crash everything: (_A_@_.A
 .
 <IGNORE>
