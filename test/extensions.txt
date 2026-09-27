@@ -298,6 +298,69 @@ Tables with embedded pipes could be tricky.
 </table>
 ````````````````````````````````
 
+Code spans should not contribute table delimiters.
+
+```````````````````````````````` example
+| a | b |
+| --- | --- |
+| `x | y` | z |
+.
+<table>
+<thead>
+<tr>
+<th>a</th>
+<th>b</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>x | y</code></td>
+<td>z</td>
+</tr>
+</tbody>
+</table>
+````````````````````````````````
+
+Multi-backtick code spans should not split on pipes.
+
+```````````````````````````````` example
+| a | b |
+| --- | --- |
+| ``code | span`` | z |
+| ```left | right``` | q |
+.
+<table>
+<thead>
+<tr>
+<th>a</th>
+<th>b</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>code | span</code></td>
+<td>z</td>
+</tr>
+<tr>
+<td><code>left | right</code></td>
+<td>q</td>
+</tr>
+</tbody>
+</table>
+````````````````````````````````
+
+Indented code lines should prevent lazy table detection.
+
+```````````````````````````````` example
+| a | b |
+    code | with | pipes
+| --- | --- |
+.
+<p>| a | b |
+code | with | pipes
+| --- | --- |</p>
+````````````````````````````````
+
 ### Oddly-formatted markers
 
 This shouldn't assert.

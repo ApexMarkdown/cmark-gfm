@@ -1,4 +1,5 @@
 #include <cmark-gfm-extension_api.h>
+#include <buffer.h>
 #include <html.h>
 #include <inlines.h>
 #include <parser.h>
@@ -147,6 +148,30 @@ static int set_cell_index(cmark_node *node, int i) {
   return 1;
 }
 
+/* Placeholder for escaped << (literal << in table cells). No underscore so inline parser doesn't treat as emphasis. */
+static const unsigned char ESCAPED_LTLT_PLACEHOLDER[] = "APEXLTLT";
+#define ESCAPED_LTLT_PLACEHOLDER_LEN 8
+
+/* Replace \<< with placeholder so it is not treated as colspan; output as << later. */
+static void replace_escaped_ltlt(cmark_mem *mem, cmark_strbuf *buf) {
+  bufsize_t r;
+  bufsize_t len = buf->size;
+  unsigned char *ptr = buf->ptr;
+  cmark_strbuf out;
+  cmark_strbuf_init(mem, &out, len + 1);
+
+  for (r = 0; r < len;) {
+    if (r + 2 < len && ptr[r] == '\\' && ptr[r + 1] == '<' && ptr[r + 2] == '<') {
+      cmark_strbuf_put(&out, ESCAPED_LTLT_PLACEHOLDER, ESCAPED_LTLT_PLACEHOLDER_LEN);
+      r += 3;
+    } else {
+      cmark_strbuf_putc(&out, ptr[r++]);
+    }
+  }
+  cmark_strbuf_swap(buf, &out);
+  cmark_strbuf_free(&out);
+}
+
 static cmark_strbuf *unescape_pipes(cmark_mem *mem, unsigned char *string, bufsize_t len)
 {
   cmark_strbuf *res = (cmark_strbuf *)mem->calloc(1, sizeof(cmark_strbuf));
@@ -166,6 +191,81 @@ static cmark_strbuf *unescape_pipes(cmark_mem *mem, unsigned char *string, bufsi
   cmark_strbuf_truncate(res, w);
 
   return res;
+}
+
+/* Keep table delimiter scanning out of code content by masking pipes. */
+static void mask_pipes_in_code(unsigned char *string, int len) {
+  int i;
+  bool in_fenced_code = false;
+  bool in_code_span = false;
+  unsigned char fence_char = 0;
+  int fence_len = 0;
+  int code_span_ticks = 0;
+  bool line_start = true;
+  int line_indent = 0;
+  bool line_is_indented_code = false;
+
+  for (i = 0; i < len; ++i) {
+    unsigned char c = string[i];
+
+    if (line_start) {
+      line_indent = 0;
+      while (i < len && string[i] == ' ' && line_indent < 4) {
+        line_indent++;
+        i++;
+      }
+      if (i >= len) {
+        break;
+      }
+      c = string[i];
+      line_start = false;
+      line_is_indented_code = !in_fenced_code && line_indent >= 4;
+
+      if (!in_code_span && line_indent <= 3 && (c == '`' || c == '~')) {
+        int j = i;
+        while (j < len && string[j] == c) {
+          j++;
+        }
+        if (j - i >= 3) {
+          if (!in_fenced_code) {
+            in_fenced_code = true;
+            fence_char = c;
+            fence_len = j - i;
+          } else if (fence_char == c && j - i >= fence_len) {
+            in_fenced_code = false;
+          }
+        }
+      }
+    }
+
+    c = string[i];
+    if (!in_fenced_code && !line_is_indented_code && c == '`') {
+      int j = i;
+      while (j < len && string[j] == '`') {
+        j++;
+      }
+      if (!in_code_span) {
+        in_code_span = true;
+        code_span_ticks = j - i;
+      } else if (j - i == code_span_ticks) {
+        in_code_span = false;
+        code_span_ticks = 0;
+      }
+      i = j - 1;
+      continue;
+    }
+
+    if (c == '|' && (in_fenced_code || line_is_indented_code || in_code_span)) {
+      string[i] = '\x1f';
+    }
+
+    if (c == '\n' || c == '\r') {
+      line_start = true;
+      if (c == '\r' && i + 1 < len && string[i + 1] == '\n') {
+        i++;
+      }
+    }
+  }
 }
 
 // Adds a new cell to the end of the row. A pointer to the new cell is returned
@@ -205,19 +305,28 @@ static table_row *row_from_string(cmark_syntax_extension *self,
   int expect_more_cells = 1;
   int row_end_offset = 0;
   int int_overflow_abort = 0;
+  unsigned char *scan_string = NULL;
+
+  scan_string = (unsigned char *)parser->mem->calloc(len + 1, sizeof(unsigned char));
+  if (!scan_string) {
+    return NULL;
+  }
+  memcpy(scan_string, string, len);
+  scan_string[len] = '\0';
+  mask_pipes_in_code(scan_string, len);
 
   row = (table_row *)parser->mem->calloc(1, sizeof(table_row));
   row->n_columns = 0;
   row->cells = NULL;
 
   // Scan past the (optional) leading pipe.
-  offset = scan_table_cell_end(string, len, 0);
+  offset = scan_table_cell_end(scan_string, len, 0);
 
   // Parse the cells of the row. Stop if we reach the end of the input, or if we
   // cannot detect any more cells.
   while (offset < len && expect_more_cells) {
-    cell_matched = scan_table_cell(string, len, offset);
-    pipe_matched = scan_table_cell_end(string, len, offset + cell_matched);
+    cell_matched = scan_table_cell(scan_string, len, offset);
+    pipe_matched = scan_table_cell_end(scan_string, len, offset + cell_matched);
 
     if (cell_matched || pipe_matched) {
       // We are guaranteed to have a cell, since (1) either we found some
@@ -226,6 +335,7 @@ static table_row *row_from_string(cmark_syntax_extension *self,
       cmark_strbuf *cell_buf = unescape_pipes(parser->mem, string + offset,
           cell_matched);
       cmark_strbuf_trim(cell_buf);
+      replace_escaped_ltlt(parser->mem, cell_buf);
 
       node_cell *cell = append_row_cell(parser->mem, row);
       if (!cell) {
@@ -251,7 +361,7 @@ static table_row *row_from_string(cmark_syntax_extension *self,
       expect_more_cells = 1;
     } else {
       // We've scanned the last cell. Check if we have reached the end of the row
-      row_end_offset = scan_table_row_end(string, len, offset);
+      row_end_offset = scan_table_row_end(scan_string, len, offset);
       offset += row_end_offset;
 
       // If the end of the row is not the end of the input,
@@ -263,7 +373,7 @@ static table_row *row_from_string(cmark_syntax_extension *self,
         free_row_cells(parser->mem, row);
 
         // Scan past the (optional) leading pipe.
-        offset += scan_table_cell_end(string, len, offset);
+        offset += scan_table_cell_end(scan_string, len, offset);
 
         expect_more_cells = 1;
       } else {
@@ -276,6 +386,8 @@ static table_row *row_from_string(cmark_syntax_extension *self,
     free_table_row(parser->mem, row);
     row = NULL;
   }
+
+  parser->mem->free(scan_string);
 
   return row;
 }
@@ -410,6 +522,15 @@ static cmark_node *try_opening_table_header(cmark_syntax_extension *self,
     header_cell->internal_offset = cell->internal_offset;
     header_cell->end_column = parent_container->start_column + cell->end_offset;
     cmark_node_set_string_content(header_cell, (char *) cell->buf->ptr);
+    /* Store raw content for colspan check (content may be cleared after inline parse) */
+    {
+      size_t len = cell->buf->size;
+      char *raw_copy = (char *)parser->mem->calloc(len + 1, 1);
+      if (raw_copy) {
+        memcpy(raw_copy, cell->buf->ptr, len);
+        cmark_node_set_user_data(header_cell, raw_copy);
+      }
+    }
     cmark_node_set_syntax_extension(header_cell, self);
     set_cell_index(header_cell, i);
   }
@@ -465,6 +586,15 @@ static cmark_node *try_opening_table_row(cmark_syntax_extension *self,
       node->internal_offset = cell->internal_offset;
       node->end_column = parent_container->start_column + cell->end_offset;
       cmark_node_set_string_content(node, (char *) cell->buf->ptr);
+      /* Store raw content for colspan check (content may be cleared after inline parse) */
+      {
+        size_t len = cell->buf->size;
+        char *raw_copy = (char *)parser->mem->calloc(len + 1, 1);
+        if (raw_copy) {
+          memcpy(raw_copy, cell->buf->ptr, len);
+          cmark_node_set_user_data(node, raw_copy);
+        }
+      }
       cmark_node_set_syntax_extension(node, self);
       set_cell_index(node, i);
     }
