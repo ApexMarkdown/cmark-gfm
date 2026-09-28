@@ -158,6 +158,13 @@ static void replace_escaped_ltlt(cmark_mem *mem, cmark_strbuf *buf) {
   bufsize_t len = buf->size;
   unsigned char *ptr = buf->ptr;
   cmark_strbuf out;
+
+  /* Too short to hold \<<. Returning early also matters for empty cells: the
+     loop would write nothing, leaving `out` allocated but never NUL-terminated,
+     and callers read the cell buffer as a C string. */
+  if (len < 3)
+    return;
+
   cmark_strbuf_init(mem, &out, len + 1);
 
   for (r = 0; r < len;) {
